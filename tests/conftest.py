@@ -28,7 +28,7 @@ def create_schema():
     """Once per test run: rebuild all tables from schema.sql."""
     with engine.begin() as conn:
         conn.execute(
-            text("DROP TABLE IF EXISTS resource_dependencies, resources, scans CASCADE")
+            text("DROP TABLE IF EXISTS findings, resource_dependencies, resources, scans CASCADE")
         )
         conn.execute(text(SCHEMA_FILE.read_text()))
 
@@ -38,7 +38,7 @@ def clean_tables():
     """Before every test: empty the tables so tests don't affect each other."""
     with engine.begin() as conn:
         conn.execute(
-            text("TRUNCATE resource_dependencies, resources, scans RESTART IDENTITY CASCADE")
+            text("TRUNCATE findings, resource_dependencies, resources, scans RESTART IDENTITY CASCADE")
         )
 
 

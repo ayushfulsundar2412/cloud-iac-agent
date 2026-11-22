@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -42,3 +42,24 @@ class DependencyCreate(BaseModel):
 class DependencyOut(DependencyCreate):
     id: int
     scan_id: int
+
+class FindingOut(BaseModel):
+    id: int
+    scan_id: int
+    resource_id: int
+    resource_name: str | None
+    resource_type: str
+    rule_id: str
+    severity: Literal["high", "medium", "low"]
+    category: Literal["risk", "cost"]
+    title: str
+    detail: dict[str, Any]
+    created_at: datetime
+
+
+class AnalysisSummary(BaseModel):
+    scan_id: int
+    resources_checked: int
+    findings: int
+    by_severity: dict[str, int]
+    by_category: dict[str, int]

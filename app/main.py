@@ -1,4 +1,6 @@
 import json
+from typing import Literal
+from app.findings import evaluate
 
 from app.ordering import CycleError, LayerCycleError, affected_by, creation_order, layer_plan
 from fastapi import Depends, FastAPI, HTTPException
@@ -6,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from app.schemas import (
-    DependencyCreate, DependencyOut, ResourceCreate, ResourceOut, ScanCreate, ScanOut,
+    DependencyCreate, DependencyOut, ResourceCreate, ResourceOut, ScanCreate, ScanOut,AnalysisSummary,FindingOut
 )
 from app.database import get_conn
 from app.schemas import ResourceCreate, ResourceOut, ScanCreate, ScanOut
@@ -286,3 +288,71 @@ def get_layers(scan_id: int, conn: Connection = Depends(get_conn)):
     except LayerCycleError as exc:
         logger.warning("layer cycle in scan %s: %s", scan_id, exc.apps)
         raise HTTPException(status_code=409, detail=str(exc))
+
+@app.post("/scans/{scan_id}/analyze", response_model=AnalysisSummary)
+def analyze_scan(scan_id: int, conn: Connection = Depends(get_conn)):
+    get_scan_or_404(conn, scan_id)
+    rows = conn.execute(
+        text("SELECT id, resource_type, config FROM resources WHERE scan_id = :sid ORDER BY id"),
+        {"sid": scan_id},
+    ).mappings().all()
+    found = evaluate([dict(r) for r in rows])
+
+    # replace the previous analysis, in the same transaction
+    conn.execute(text("DELETE FROM findings WHERE scan_id = :sid"), {"sid": scan_id})
+    if found:
+        conn.execute(
+            text(
+                "INSERT INTO findings "
+                "(scan_id, resource_id, rule_id, severity, category, title, detail) "
+                "VALUES (:sid, :rid, :rule, :sev, :cat, :title, CAST(:detail AS JSONB))"
+            ),
+            [
+                {
+                    "sid": scan_id,
+                    "rid": f.resource_id,
+                    "rule": f.rule_id,
+                    "sev": f.severity,
+                    "cat": f.category,
+                    "title": f.title,
+                    "detail": json.dumps(f.detail),
+                }
+                for f in found
+            ],
+        )
+    logger.info("scan %s analysed: %s findings", scan_id, len(found))
+    return {
+        "scan_id": scan_id,
+        "resources_checked": len(rows),
+        "findings": len(found),
+        "by_severity": {s: sum(1 for f in found if f.severity == s) for s in ("high", "medium", "low")},
+        "by_category": {c: sum(1 for f in found if f.category == c) for c in ("risk", "cost")},
+    }
+
+
+@app.get("/scans/{scan_id}/findings", response_model=list[FindingOut])
+def list_findings(
+    scan_id: int,
+    severity: Literal["high", "medium", "low"] | None = None,
+    category: Literal["risk", "cost"] | None = None,
+    conn: Connection = Depends(get_conn),
+):
+    get_scan_or_404(conn, scan_id)
+    query = (
+        "SELECT f.id, f.scan_id, f.resource_id, r.name AS resource_name, r.resource_type, "
+        "f.rule_id, f.severity, f.category, f.title, f.detail, f.created_at "
+        "FROM findings f JOIN resources r ON r.id = f.resource_id WHERE f.scan_id = :sid"
+    )
+    params: dict = {"sid": scan_id}
+    if severity:
+        query += " AND f.severity = :sev"
+        params["sev"] = severity
+    if category:
+        query += " AND f.category = :cat"
+        params["cat"] = category
+    query += (
+        " ORDER BY CASE f.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+        "f.rule_id, f.resource_id"
+    )
+    rows = conn.execute(text(query), params).mappings().all()
+    return [dict(r) for r in rows]
