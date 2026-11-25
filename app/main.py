@@ -1,9 +1,11 @@
 import json
 from typing import Literal
 from app.findings import evaluate
+from datetime import datetime, timezone
+from app.reporting import build_report, llm_explainer, render_markdown
 
 from app.ordering import CycleError, LayerCycleError, affected_by, creation_order, layer_plan
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException,Response
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
@@ -356,3 +358,35 @@ def list_findings(
     )
     rows = conn.execute(text(query), params).mappings().all()
     return [dict(r) for r in rows]
+
+def _report_inputs(conn: Connection, scan_id: int):
+    scan = get_scan_or_404(conn, scan_id)
+    rows = conn.execute(
+        text(
+            "SELECT id, resource_type, resource_id, name, app, config "
+            "FROM resources WHERE scan_id = :sid ORDER BY id"
+        ),
+        {"sid": scan_id},
+    ).mappings().all()
+    return scan, [dict(r) for r in rows]
+
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+@app.get("/scans/{scan_id}/report")
+def scan_report(scan_id: int, explain: bool = False, conn: Connection = Depends(get_conn)):
+    scan, resources = _report_inputs(conn, scan_id)
+    return build_report(
+        scan, resources, explainer=llm_explainer if explain else None, generated_at=_stamp()
+    )
+
+
+@app.get("/scans/{scan_id}/report.md")
+def scan_report_markdown(scan_id: int, explain: bool = False, conn: Connection = Depends(get_conn)):
+    scan, resources = _report_inputs(conn, scan_id)
+    report = build_report(
+        scan, resources, explainer=llm_explainer if explain else None, generated_at=_stamp()
+    )
+    return Response(content=render_markdown(report), media_type="text/markdown; charset=utf-8")

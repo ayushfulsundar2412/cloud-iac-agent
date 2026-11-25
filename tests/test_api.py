@@ -201,3 +201,45 @@ def test_invalid_app_name_is_rejected(client):
         json={"resource_type": "s3_bucket", "resource_id": "b", "app": "Billing App"},
     )
     assert r.status_code == 422
+
+def estate(client):
+    scan = make_scan(client)
+    make_resource(client, scan["id"], resource_type="security_group", resource_id="sg-1",
+                  name="open-ssh",
+                  config={"inbound": [{"protocol": "tcp", "from_port": 22, "to_port": 22,
+                                       "cidr": "0.0.0.0/0"}]})
+    make_resource(client, scan["id"], resource_type="ebs_volume", resource_id="vol-1",
+                  name="old-disk",
+                  config={"state": "available", "volume_type": "gp2", "size_gb": 100})
+    return scan
+
+
+def test_report_json(client):
+    scan = estate(client)
+    r = client.get(f"/scans/{scan['id']}/report")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["summary"]["findings"] == 3
+    assert body["summary"]["savings"]["total_usd"] == 10.0
+    assert {item["explained_by"] for item in body["findings"]} == {"fixed text"}
+
+
+def test_report_markdown(client):
+    scan = estate(client)
+    r = client.get(f"/scans/{scan['id']}/report.md")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/markdown")
+    assert "# Cloud estate report" in r.text
+    assert "$10.00" in r.text
+
+
+def test_report_for_an_empty_scan(client):
+    scan = make_scan(client)
+    body = client.get(f"/scans/{scan['id']}/report").json()
+    assert body["summary"]["findings"] == 0
+
+
+def test_report_endpoints_return_404_for_a_missing_scan(client):
+    assert client.get("/scans/999/report").status_code == 404
+    assert client.get("/scans/999/report.md").status_code == 404
+
