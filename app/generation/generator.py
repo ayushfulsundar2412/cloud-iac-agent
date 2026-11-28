@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.generation.hcl import hcl_str, safe_name
-from app.generation.templates import RENDERERS
+from app.generation.templates import RENDERERS, needs_admin_cidr
 from app.ordering import creation_order, layer_plan
 
 REGION_PATTERN = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d$")
@@ -25,6 +25,19 @@ provider "aws" {
 }
 """
 
+# A variable with no default: a person must choose the address range.
+ADMIN_CIDR_VARIABLE = (
+    'variable "admin_cidr" {\n'
+    "  type        = string\n"
+    '  description = "Address range allowed to use SSH and remote desktop, such as the office or VPN range"\n'
+    "\n"
+    "  validation {\n"
+    '    condition     = can(cidrhost(var.admin_cidr, 0)) && var.admin_cidr != "0.0.0.0/0"\n'
+    '    error_message = "Use a specific address range such as 203.0.113.0/24, not the whole internet."\n'
+    "  }\n"
+    "}"
+)
+
 
 @dataclass
 class GenerationResult:
@@ -37,6 +50,7 @@ class LayeredResult:
     files: dict[str, str]  # relative path -> file text
     plan: dict             # the layer plan this output follows
     gaps: list[str] = field(default_factory=list)
+    generated_ids: set = field(default_factory=set)  # resources that got Terraform
 
 
 def _check_region(region: str) -> None:
@@ -63,7 +77,7 @@ def _local_names(by_id: dict, dependencies: list[dict]) -> dict:
     return names
 
 
-def _render_layer(layer_ids, by_id, dependencies, local_names, generated):
+def _render_layer(layer_ids, by_id, dependencies, local_names, generated, fix=False):
     """Write the blocks for one folder. Returns (blocks, gaps)."""
     layer_set = set(layer_ids)
     edges = [
@@ -104,23 +118,28 @@ def _render_layer(layer_ids, by_id, dependencies, local_names, generated):
                 )
                 references.append(f"data.aws_security_group.{local}.id")
 
-        rendered, rendered_gaps = renderer(r, local_names[rid], {"security_groups": references})
+        rendered, rendered_gaps = renderer(
+            r, local_names[rid], {"security_groups": references}, fix
+        )
         gaps.extend(rendered_gaps)
         if rendered:
             blocks.extend(rendered)
             generated.add(rid)
 
-    return list(data_blocks.values()) + blocks, gaps
+    prefix = []
+    if fix and any(rid in generated and needs_admin_cidr(by_id[rid]) for rid in layer_set):
+        prefix.append(ADMIN_CIDR_VARIABLE)  # declared only in folders that use it
+    return prefix + list(data_blocks.values()) + blocks, gaps
 
 
 def generate_terraform(
-    region: str, resources: list[dict], dependencies: list[dict]
+    region: str, resources: list[dict], dependencies: list[dict], fix: bool = False
 ) -> GenerationResult:
     """Everything in one folder."""
     _check_region(region)
     by_id = {r["id"]: r for r in resources}
     local_names = _local_names(by_id, dependencies)
-    blocks, gaps = _render_layer(list(by_id), by_id, dependencies, local_names, set())
+    blocks, gaps = _render_layer(list(by_id), by_id, dependencies, local_names, set(), fix)
     return GenerationResult(main_tf=_file_text(region, blocks), gaps=gaps)
 
 
@@ -146,7 +165,7 @@ def _apply_order_doc(plan: dict) -> str:
 
 
 def generate_layers(
-    region: str, resources: list[dict], dependencies: list[dict]
+    region: str, resources: list[dict], dependencies: list[dict], fix: bool = False
 ) -> LayeredResult:
     """One folder per layer, plus an APPLY_ORDER.md."""
     _check_region(region)
@@ -167,12 +186,12 @@ def generate_layers(
     for layer in plan["apply_order"]:
         name = layer["layer"]
         blocks, layer_gaps = _render_layer(
-            layer["resource_ids"], by_id, dependencies, local_names, generated
+            layer["resource_ids"], by_id, dependencies, local_names, generated, fix
         )
         gaps.extend(layer_gaps)
         files[f"{name}/main.tf"] = _file_text(region, blocks)
     files["APPLY_ORDER.md"] = _apply_order_doc(plan)
-    return LayeredResult(files=files, plan=plan, gaps=gaps)
+    return LayeredResult(files=files, plan=plan, gaps=gaps, generated_ids=generated)
 
 
 def write_files(files: dict[str, str], out_dir: Path) -> None:

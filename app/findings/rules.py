@@ -39,6 +39,20 @@ def _exposed(config: dict, watched: dict) -> list:
             hits.append({"ports": f"{low}-{high}", "services": services, "source": perm["cidr"]})
     return hits
 
+def is_world_admin_rule(perm) -> bool:
+    """True for an inbound rule that opens SSH or remote desktop to the whole internet."""
+    if not isinstance(perm, dict):
+        return False
+    if str(perm.get("cidr")) not in WORLD:
+        return False
+    if str(perm.get("protocol", "tcp")) != "tcp":
+        return False
+    bounds = _port_range(perm)
+    if bounds is None:
+        return False
+    low, high = bounds
+    return any(low <= port <= high for port in ADMIN_PORTS)
+
 
 def _is_zero(value) -> bool:
     return type(value) in (int, float) and value == 0  # False is not zero days

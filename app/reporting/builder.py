@@ -4,6 +4,7 @@ from dataclasses import asdict
 from app.findings import Finding, evaluate
 from app.reporting.knowledge import KNOWLEDGE
 from app.reporting.pricing import estimate_savings
+from app.reporting.fixes import fix_status
 
 SEVERITIES = ("high", "medium", "low")
 CATEGORIES = ("risk", "cost")
@@ -81,8 +82,14 @@ def _savings(items: list[dict]) -> dict:
         ],
     }
 
-
-def build_report(scan: dict, resources: list[dict], explainer=None, generated_at: str = "") -> dict:
+def build_report(
+    scan: dict,
+    resources: list[dict],
+    explainer=None,
+    generated_at: str = "",
+    generated_ids=None,
+    terraform_gaps=None,
+) -> dict:
     by_id = {r["id"]: r for r in resources}
     items = []
     for finding in evaluate(resources):
@@ -102,6 +109,11 @@ def build_report(scan: dict, resources: list[dict], explainer=None, generated_at
                 explanation = None
 
         knowledge = KNOWLEDGE[finding.rule_id]
+        terraform_fix = (
+            fix_status(finding.rule_id, finding.resource_id, generated_ids)
+            if generated_ids is not None
+            else None
+        )
         items.append(
             {
                 "rule_id": finding.rule_id,
@@ -121,8 +133,17 @@ def build_report(scan: dict, resources: list[dict], explainer=None, generated_at
                 "suggested_fix": explanation.suggested_fix if explanation else knowledge["fix"],
                 "explained_by": "llm" if explanation else "fixed text",
                 "estimate": estimate,
+                "terraform_fix": terraform_fix,
             }
         )
+
+    # counted once, after the loop, so an empty estate works too
+    fixes = None
+    if generated_ids is not None:
+        fixes = {}
+        for item in items:
+            status = item["terraform_fix"]["status"]
+            fixes[status] = fixes.get(status, 0) + 1
 
     return {
         "scan": {"id": scan["id"], "account_id": scan["account_id"], "region": scan["region"]},
@@ -133,12 +154,12 @@ def build_report(scan: dict, resources: list[dict], explainer=None, generated_at
             "by_severity": {s: sum(1 for i in items if i["severity"] == s) for s in SEVERITIES},
             "by_category": {c: sum(1 for i in items if i["category"] == c) for c in CATEGORIES},
             "savings": _savings(items),
+            "fixes": fixes,
         },
         "findings": items,
         "coverage": _coverage(resources),
+        "terraform": {"gaps": list(terraform_gaps)} if terraform_gaps is not None else None,
     }
-
-
 # ---- markdown ----
 
 def _money(value: float) -> str:
@@ -170,6 +191,9 @@ def _block(number: int, item: dict) -> list[str]:
         f"- Why it matters: {_plain(item['why_it_matters'])}",
         f"- Suggested fix: {_plain(item['suggested_fix'])}",
     ]
+    if item.get("terraform_fix"):
+        fix = item["terraform_fix"]
+        lines.append(f"- Terraform fix: {fix['status']}. {_plain(fix['note'])}")
     if item["category"] == "cost":
         estimate = item["estimate"]
         if estimate:
@@ -213,6 +237,12 @@ def render_markdown(report: dict) -> str:
             f"- Potential savings (estimated): {prefix}{_money(savings['total_usd'])} per month, "
             f"from {savings['estimated']} of {savings['cost_findings']} cost findings"
         )
+    if summary.get("fixes"):
+        order = ("proposed", "blocked", "needs a person", "not yet supported")
+        counts = ", ".join(
+            f"{status} {summary['fixes'][status]}" for status in order if status in summary["fixes"]
+        )
+        lines.append(f"- Terraform fixes: {counts}")
     lines += [
         "",
         "Findings are potential, not promises. A person should review each item before acting on it.",
@@ -246,6 +276,15 @@ def render_markdown(report: dict) -> str:
             "",
         ]
 
+    terraform = report.get("terraform")
+    if terraform:
+        lines += ["## Terraform: what could not be generated", ""]
+        if terraform["gaps"]:
+            lines += [f"- {_plain(gap)}" for gap in terraform["gaps"]]
+        else:
+            lines.append("None.")
+        lines.append("")
+
     cov = report["coverage"]
     lines += ["## What this report could not check", "", f"- Fully checked: {cov['fully_checked']} resources"]
     if cov["partly_checked"]:
@@ -272,5 +311,7 @@ def render_markdown(report: dict) -> str:
         "- Figures marked \"up to\" are upper bounds.",
         "- Explanations are written in advance, unless the report says a language model wrote them. "
         "Model text is checked for shape and cannot contain prices.",
+        "- Terraform fixes are proposals, shown as a diff against the current code. A person must review "
+        "and apply them, and some change who can reach a system.",
     ]
     return "\n".join(lines) + "\n"

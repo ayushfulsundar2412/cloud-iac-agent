@@ -1,3 +1,4 @@
+from app.generation.diff import unified_diff
 from app.generation.generator import (
     GenerationResult,
     LayeredResult,
@@ -11,5 +12,6 @@ __all__ = [
     "LayeredResult",
     "generate_layers",
     "generate_terraform",
+    "unified_diff",
     "write_files",
 ]
